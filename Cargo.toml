@@ -1,0 +1,20 @@
+[package]
+name = "vb64"
+version = "0.1.0"
+edition = "2021"
+
+authors = ["Miguel Young de la Sota <mcyoung@mit.edu>"]
+description = "SIMD base64 codecs"
+homepage = "https://github.com/mcy/vb64"
+repository = "https://github.com/mcy/vb64"
+keywords = ["base64", "simd", "text", "binary", "parser"]
+
+license = "Apache-2.0"
+
+[dev-dependencies]
+base64 = "0.21.5"
+criterion = { version = "0.4", features = ["html_reports"] }
+
+[[bench]]
+name = "bench"
+harness = false
