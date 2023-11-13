@@ -6,9 +6,9 @@
 //!
 //! The following is a perf comparison with the `base64` crate on a Zen 2
 //! machine using AVX2 instructions; lower is better.
-//! 
+//!
 //! ![perf comparison with `base64`][graph-png]
-//! 
+//!
 //! On a Zen 2 machine and compiling with AVX2 support, decoding is between
 //! 2x to 2.5x faster than `base64`, while encoding is around 1.2x to 1.5x
 //! faster; with only SSSE3, decoding performance is even with `base64` and
@@ -18,11 +18,11 @@
 //! for your application that this matters, unless you're parsing base64 blobs
 //! embedded in JSON; you may want to consider using a binary format like
 //! Protobuf instead.
-//! 
+//!
 //! Also this crate uses `std::simd` so it requires nightly.
 //!
 //! # Constant time?? 👀
-//! 
+//!
 //! For decoding valid base64 (and for encoding any message), the
 //! implementations are essentially constant-time, but mostly by accident, since
 //! they are branchless and use shuffle-based lookup tables. Whether you
@@ -33,7 +33,6 @@
 // The comedy of using base64 to encode an image of benchmark results from my
 // base64 library is not lost on me.
 #![doc = concat!("[graph-png]: data:image/png;base64,", include_str!("../images/graph.png.base64"))]
-
 #![feature(portable_simd)]
 
 use std::simd::LaneCount;
@@ -68,7 +67,7 @@ pub fn decode_to(data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
   if cfg!(target_feature = "avx2") {
     decode_tunable::<32>(data, out)
   } else {
-    decode_tunable::<32>(data, out)
+    decode_tunable::<16>(data, out)
   }
 }
 
@@ -106,9 +105,8 @@ where
 
   let mut chunks = data.chunks_exact(N);
   let mut failed = false;
-  while let Some(chunk) = chunks.next().filter(|_| !failed) {
-    let ascii = Simd::from_slice(chunk);
-    let (decoded, ok) = simd::decode(ascii);
+  for chunk in &mut chunks {
+    let (decoded, ok) = simd::decode(Simd::from_slice(chunk));
     failed |= !ok;
 
     unsafe {
@@ -118,11 +116,8 @@ where
   }
 
   let rest = chunks.remainder();
-  if !failed && !rest.is_empty() {
-    // 'A' decodes as 0, so we can pretend the rest of the array is padded with
-    // 'A's.
-    let ascii = Simd::gather_or(rest, simd!(N; |i| i), Simd::splat(b'A'));
-    let (decoded, ok) = simd::decode(ascii.into());
+  if !rest.is_empty() {
+    let (decoded, ok) = simd::decode(from_slice_or::<N, b'A'>(rest));
     failed |= !ok;
 
     unsafe {
@@ -197,7 +192,7 @@ where
       let rest = end.offset_from(start) as usize;
       std::slice::from_raw_parts(start, rest.min(n3q))
     };
-    let encoded = simd::encode(Simd::gather_or_default(chunk, simd!(N; |i| i)));
+    let encoded = simd::encode(from_slice_or::<N, 0>(chunk));
 
     unsafe {
       start = start.add(chunk.len());
@@ -235,6 +230,90 @@ fn encoded_len(input: usize) -> usize {
       2 => 3,
       _ => 0,
     }
+}
+
+/// Gathers elements, in order, from `slice`, replacing them with `Z`
+/// if `slice` is too short.
+///
+/// This is approximately 2-3x faster than `Simd::gather_or` on AVX2.
+#[inline(always)]
+fn from_slice_or<const N: usize, const Z: u8>(slice: &[u8]) -> Simd<u8, N>
+where
+  LaneCount<N>: SupportedLaneCount,
+{
+  if slice.len() >= N {
+    return unsafe { slice.as_ptr().cast::<Simd<u8, N>>().read_unaligned() };
+  }
+
+  let mut buf = [Z; N];
+
+  // Load a bunch of big 16-byte chunks. This should select "load vector"
+  // instructions.
+  let ascii_ptr = buf.as_mut_ptr();
+  let mut write_at = ascii_ptr;
+  if slice.len() >= 16 {
+    for i in 0..slice.len() / 16 {
+      unsafe {
+        write_at = write_at.add(i * 16);
+
+        let word = slice.as_ptr().cast::<u128>().add(i).read_unaligned();
+        write_at.cast::<u128>().write_unaligned(word);
+      }
+    }
+  }
+
+  // This block loads the "remainder of the remainder" by essentially doing
+  // something like a binary search on rest.len() % 16.
+  //
+  // Each of the "load" functions below loads a very small variable-length
+  // buffer into a scalar without branching on the length, which means that
+  // the total number of branches necessary is logarithmic, rather than
+  // linear, in rest.len() % 16, and the number of loads is ~constant.
+  //
+  // For the >= 8/4 cases, we perform two 8/4-byte loads respectively that cover
+  // the low and high 8/4 bytes of the buffer, and then we shift the high chunk
+  // so it overlaps the low one and or them together.
+  //
+  // For the 1..=3 case, we perform three byte loads and carefully align them;
+  // see the case below for how this is done.
+  //
+  // I don't know precisely who this trick is due to, but I learned it while
+  // contributing to Swisstable, since Abseil uses a version of it in its
+  // low-level string hash implementation.
+  unsafe {
+    let ptr = slice.as_ptr().offset(write_at.offset_from(ascii_ptr));
+    let len = slice.len() % 16;
+    if len >= 8 {
+      let lo = ptr.cast::<u64>().read_unaligned() as u128;
+      let hi = ptr.add(len - 8).cast::<u64>().read_unaligned() as u128;
+      let data = lo | (hi << ((len - 8) * 8));
+
+      let z = u128::from_ne_bytes([Z; 16]) << (len * 8);
+      write_at.cast::<u128>().write_unaligned(data | z);
+    } else if len >= 4 {
+      let lo = ptr.cast::<u32>().read_unaligned() as u64;
+      let hi = ptr.add(len - 4).cast::<u32>().read_unaligned() as u64;
+      let data = lo | (hi << ((len - 4) * 8));
+
+      let z = u64::from_ne_bytes([Z; 8]) << (len * 8);
+      write_at.cast::<u64>().write_unaligned(data | z);
+    } else {
+      // For len       1       2       3     ...
+      // ... this is  ptr[0]  ptr[0]  ptr[0]
+      let lo = ptr.read() as u32;
+      // ... this is  ptr[0]  ptr[1]  ptr[1]
+      let mid = ptr.add(len / 2).read() as u32;
+      // ... this is  ptr[0]  ptr[1]  ptr[2]
+      let hi = ptr.add(len - 1).read() as u32;
+
+      let data = lo | (mid << ((len / 2) * 8)) | hi << ((len - 1) * 8);
+
+      let z = u32::from_ne_bytes([Z; 4]) << (len * 8);
+      write_at.cast::<u32>().write_unaligned(data | z);
+    }
+  }
+
+  buf.into()
 }
 
 #[cfg(test)]

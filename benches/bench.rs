@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
@@ -7,7 +9,7 @@ fn tests() -> Vec<(usize, &'static [u8], Vec<u8>)> {
   include_bytes!("../src/test_vectors.txt")
     .split(|&b| b == b'\n')
     .enumerate()
-    .skip(8)
+    .take(256)
     .map(|(i, b64)| (i, b64, BASE64_STANDARD.decode(b64).unwrap()))
     .collect()
 }
@@ -32,7 +34,9 @@ fn decode(c: &mut Criterion) {
     );
 
     group
-      .sample_size(500)
+      .warm_up_time(Duration::from_millis(250))
+      .measurement_time(Duration::from_millis(500))
+      .sample_size(250)
       .throughput(Throughput::Bytes(len as u64))
       .bench_with_input(BenchmarkId::new("vb64", i), enc, |b, enc| {
         b.iter(|| vb64::decode(enc))
@@ -48,6 +52,9 @@ fn encode(c: &mut Criterion) {
   let mut group = c.benchmark_group("encode");
   for (i, _, dec) in tests() {
     group
+      .warm_up_time(Duration::from_millis(250))
+      .measurement_time(Duration::from_millis(500))
+      .sample_size(250)
       .throughput(Throughput::Bytes(dec.len() as u64))
       .bench_with_input(BenchmarkId::new("vb64", i), &dec, |b, dec| {
         b.iter(|| vb64::encode(dec))
