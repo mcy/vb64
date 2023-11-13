@@ -90,8 +90,8 @@ where
     0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000,
   ]);
 
-  let lo = shuffle::<16, N>(LO_LUT, ascii & Simd::splat(0x0f));
-  let hi = shuffle::<16, N>(HI_LUT, ascii >> Simd::splat(4));
+  let lo = swizzle::<16, N>(LO_LUT, ascii & Simd::splat(0x0f));
+  let hi = swizzle::<16, N>(HI_LUT, ascii >> Simd::splat(4));
   let valid = (lo & hi).reduce_or() == 0;
 
   // Now we need to shift everything a little bit, since each byte has two high
@@ -130,11 +130,16 @@ where
   let sextets16 = sextets.cast::<u16>();
   let shifted = sextets16 << simd!(N; |i| [2, 4, 6, 0][i % 4]);
 
-  // Now we need to split `shifted` into two `u8` vectors of N lanes. The
-  // "easiest" way to do this is with deinterleave and a transmute.
+  let split = |x: Simd<u16, N>| {
+    let lows = x.cast::<u8>();
+    let highs = (x >> Simd::splat(8)).cast::<u8>();
+    Simd::interleave(lows, highs).0
+  };
+
+  // Now we need to split `shifted` into two `u8` vectors of N lanes.
   let (a16, b16) = Simd::deinterleave(shifted, Simd::splat(0));
-  let (a8, _) = unpack16(a16);
-  let (b8, _) = unpack16(b16);
+  let a8 = split(a16);
+  let b8 = split(b16);
 
   // We're not quite done, because every other byte of the above vectors needs
   // to be shifted a multiple of bytes correlated with its index.
@@ -169,9 +174,12 @@ where
     i / 4 * 3 + [1, 0, 2, N][i % 4]
   }));
 
-  let a16 = pack16(a8, Simd::splat(0));
-  let b16 = pack16(b8, Simd::splat(0));
-  let (shifted, _) = Simd::interleave(a16, b16);
+  let join = |x: Simd<u8, N>| {
+    let (lows, highs) = Simd::deinterleave(x, Simd::splat(0));
+    lows.cast::<u16>() | highs.cast::<u16>() << Simd::splat(8)
+  };
+
+  let (shifted, _) = Simd::interleave(join(a8), join(b8));
 
   let sextets = (shifted >> simd!(N; |i| [2, 4, 6, 0][i % 4])).cast::<i8>();
 
@@ -192,32 +200,6 @@ where
     - mask_splat(slashes, 16);
 
   ascii.cast::<u8>()
-}
-
-/// Undoes the operation in `pack16()`: splits the vector into two vectors of
-/// half the length, and interprets each u16 as a pair of bytes.
-fn unpack16<const N: usize>(x: Simd<u16, N>) -> (Simd<u8, N>, Simd<u8, N>)
-where
-  LaneCount<N>: SupportedLaneCount,
-{
-  let lows = x.cast::<u8>();
-  let highs = (x >> Simd::splat(8)).cast::<u8>();
-
-  (
-    swizzle!(N; lows, highs, array!(N; |i| i / 2 + [0, N][i % 2])),
-    swizzle!(N; lows, highs, array!(N; |i| (i + N) / 2 + [0, N][i % 2])),
-  )
-}
-
-/// Concatenates two vectors of bytes into a vector of twice the length, and then
-/// reinterprets each consecutive pair of bytes as a u16.
-fn pack16<const N: usize>(x: Simd<u8, N>, y: Simd<u8, N>) -> Simd<u16, N>
-where
-  LaneCount<N>: SupportedLaneCount,
-{
-  let lows = swizzle!(N; x, y, array!(N; |i| i * 2));
-  let highs = swizzle!(N; x, y, array!(N; |i| i * 2 + 1));
-  lows.cast::<u16>() | highs.cast::<u16>() << Simd::splat(8)
 }
 
 /// Shorthand for mask.select(splat(val), splat(0)).
@@ -245,7 +227,7 @@ where
 /// Creates a new `M`-byte vector by treating each element of `indices` as an
 /// index into `table`, which is treated as being padded to infinite length
 /// with zero.
-fn shuffle<const N: usize, const M: usize>(
+fn swizzle<const N: usize, const M: usize>(
   table: Simd<u8, N>,
   indices: Simd<u8, M>,
 ) -> Simd<u8, M>
