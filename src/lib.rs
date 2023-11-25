@@ -40,8 +40,7 @@ use std::simd::Simd;
 use std::simd::SupportedLaneCount;
 
 #[macro_use]
-mod macros;
-
+mod util;
 mod simd;
 
 /// The error returned by all decode functions.

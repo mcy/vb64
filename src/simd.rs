@@ -6,7 +6,7 @@ use std::simd::LaneCount;
 use std::simd::SimdElement;
 use std::simd::SupportedLaneCount;
 
-use crate::macros::invert_index;
+use crate::util::invert_index;
 
 /// Decodes `ascii` as base64. Returns the results of the decoding in the low
 /// 3/4 of the returned vector, as well as whether decoding completed

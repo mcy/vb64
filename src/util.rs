@@ -29,17 +29,15 @@ pub const unsafe fn array_assume_init<T: Copy, const N: usize>(
 macro_rules! array {
   ($N:expr; |$idx:ident| $body:expr) => {{
     use std::mem::MaybeUninit;
+    
     let mut array = [MaybeUninit::uninit(); $N];
     let mut i = 0;
     while i < $N {
-      array[i] = MaybeUninit::new({
-        let $idx = i;
-        $body
-      });
+      array[i] = MaybeUninit::new({ let $idx = i; $body });
       i += 1;
     }
 
-    unsafe { $crate::macros::array_assume_init::<_, $N>(&array) }
+    unsafe { $crate::util::array_assume_init::<_, $N>(&array) }
   }};
 }
 
@@ -54,11 +52,7 @@ macro_rules! simd {
 /// Like std::simd::swizzle!, but where the static indexing vector can depend
 /// on a const parameter, e.g. an `array!()` call.
 macro_rules! swizzle {
-  ($N:ident; $x:expr, $index:expr) => {
-    swizzle!($N; $x, Simd::splat(0), $index)
-  };
-
-  ($N:ident; $x:expr, $y:expr, $index:expr) => {{
+  ($N:ident; $x:expr, $index:expr) => {{
     use std::simd::*;
     struct Swz;
     impl<const $N: usize> Swizzle2<$N, $N> for Swz
@@ -77,29 +71,6 @@ macro_rules! swizzle {
       };
     }
 
-    Swz::swizzle2($x, $y)
-  }};
-
-  ($N:ident x $M:ident; $x:expr, $y:expr, $index:expr) => {{
-    use std::simd::*;
-    struct Swz;
-    impl<const $N: usize, const $M: usize> Swizzle2<$N, $M> for Swz
-    where
-      LaneCount<$N>: SupportedLaneCount,
-      LaneCount<$M>: SupportedLaneCount,
-    {
-      const INDEX: [Which; $M] = {
-        let index = $index;
-        array!($M; |i| {
-          let i = index[i];
-          match i.checked_sub($N) {
-            None => Which::First(i),
-            Some(j) => Which::Second(j),
-          }
-        })
-      };
-    }
-
-    Swz::swizzle2($x, $y)
+    Swz::swizzle2($x, Simd::splat(0))
   }};
 }
