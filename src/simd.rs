@@ -1,9 +1,12 @@
 //! Core SIMD implementation.
 
+use core::fmt;
 use std::simd::prelude::*;
 use std::simd::LaneCount;
 use std::simd::SimdElement;
 use std::simd::SupportedLaneCount;
+
+use crate::macros::invert_index;
 
 /// Decodes `ascii` as base64. Returns the results of the decoding in the low
 /// 3/4 of the returned vector, as well as whether decoding completed
@@ -112,46 +115,32 @@ where
   //  eeeeee.......... ffffff.......... gggggg.......... hhhhhh..........
   //
   // u16 shift:
-  //  ..aaaaaa|........ ....bbbb|bb...... ......cc|cccc.... dddddd..|........
-  //  ..eeeeee|........ ....ffff|ff...... ......gg|gggg.... hhhhhh..|........
+  //  ..aaaaaa|........ ....bbbb|bb...... ......cc|cccc.... ........|dddddd..
+  //  ..eeeeee|........ ....ffff|ff...... ......gg|gggg.... ........|hhhhhh..
   //
-  // u16 deinterleave
-  //  ..aaaaaa|........ ......cc|cccc.... ..eeeeee|........ ......gg|gggg....
-  //  ....bbbb|bb...... dddddd..|........ ....ffff|ff...... hhhhhh..|........
+  // u16 d3einterleave:
+  //  ..aaaaaa ....bbbb ......cc ........ ..eeeeee ....ffff ......gg ........
+  //  ........ bb...... cccc.... dddddd.. ........ ff...... gggg.... hhhhhh..
   //
-  // u8 shuffles:
-  //  ..aaaaaa|cccc.... ......cc|..eeeeee ....ffff|......gg ........|........
-  //  bb......|....bbbb dddddd..|ff...... gggg....|hhhhhh.. ........|........
+  // u8 rotate:
+  //  ..aaaaaa ....bbbb ......cc ........ ..eeeeee ....ffff ......gg ........
+  //  bb...... cccc.... dddddd.. ........ ff...... gggg.... hhhhhh.. ........
   //
+  // u8 or:
+  //  bbaaaaaa ccccbbbb ddddddcc ........ ffeeeeee ggggffff hhhhhhgg ........
   //
-  // or:
+  // u8 shuffle:
   //  bbaaaaaa ccccbbbb ddddddcc ffeeeeee ggggffff hhhhhhgg ........ ........
 
-  let sextets16 = sextets.cast::<u16>();
-  let shifted = sextets16 << simd!(N; |i| [2, 4, 6, 0][i % 4]);
+  let shifted = sextets.cast::<u16>() << simd!(N; |i| [2, 4, 6, 8][i % 4]);
 
-  let split = |x: Simd<u16, N>| {
-    let lows = x.cast::<u8>();
-    let highs = (x >> Simd::splat(8)).cast::<u8>();
-    Simd::interleave(lows, highs).0
-  };
+  let lo = shifted.cast::<u8>();
+  let hi = (shifted >> Simd::from([8; N])).cast::<u8>();
+  let decoded_chunks = lo | hi.rotate_lanes_left::<1>();
 
-  // Now we need to split `shifted` into two `u8` vectors of N lanes.
-  let (a16, b16) = Simd::deinterleave(shifted, Simd::splat(0));
-  let a8 = split(a16);
-  let b8 = split(b16);
+  let output = swizzle!(N; decoded_chunks, array!(N; |i| i + i / 3));
 
-  // We're not quite done, because every other byte of the above vectors needs
-  // to be shifted a multiple of bytes correlated with its index.
-  //
-  // Essentially, we need to delete one out of every four bytes (1 mod 4 and
-  // 3 mod 4 bytes resp.) and also swap the two bytes that contain chunks of
-  // the same sextet. In other words, the pattern is (0, 3, 2) + 4n and
-  // (1, 0, 2) + 4n
-  let a = swizzle!(N; a8, array!(N; |i| i / 3 * 4 + [0, 3, 2][i % 3]));
-  let b = swizzle!(N; b8, array!(N; |i| i / 3 * 4 + [1, 0, 2][i % 3]));
-
-  (a | b, valid)
+  (output, valid)
 }
 
 /// Encodes the low 3/4 bytes of `data` as base64. The high quarter of the
@@ -161,45 +150,60 @@ pub fn encode<const N: usize>(data: Simd<u8, N>) -> Simd<u8, N>
 where
   LaneCount<N>: SupportedLaneCount,
 {
-  // First, we need to begin by undoing the "or" at the end of decode_simd.
-  // This is a matter of applying a mask made of the 24 (little endian)
-  // bits 00111111 11110000 00000011 = [251, 31, 196] repeating.
-  let mask = simd!(N; |i| [0b11111100, 0b00001111, 0b11000000][i % 3]);
+  // First, insert some extra zeros every third lane.
+  let data = swizzle!(N; data, invert_index(array!(N; |i| i + i / 3)));
 
-  // This is the inverse of the shuffle at the end of decode().
-  let a8 = swizzle!(N; data & mask, array!(N; |i| {
-    i / 4 * 3 + [0, N, 2, 1][i % 4]
-  }));
-  let b8 = swizzle!(N; data & !mask, array!(N; |i| {
-    i / 4 * 3 + [1, 0, 2, N][i % 4]
-  }));
+  // Next, we need to undo the "or" at the end of decode_simd.
+  let mask =
+    simd!(N; |i| [0b11111100, 0b11110000, 0b11000000, 0b00000000][i % 4]);
 
-  let join = |x: Simd<u8, N>| {
-    let (lows, highs) = Simd::deinterleave(x, Simd::splat(0));
-    lows.cast::<u16>() | highs.cast::<u16>() << Simd::splat(8)
-  };
+  // Note that we also need to undo the rotate we did to `hi`.
+  let lo = data & mask;
+  let hi = (data & !mask).rotate_lanes_right::<1>();
 
-  let (shifted, _) = Simd::interleave(join(a8), join(b8));
-
-  let sextets = (shifted >> simd!(N; |i| [2, 4, 6, 0][i % 4])).cast::<i8>();
+  // Interleave the shuffled pieces and undo the shift.
+  let shifted = lo.cast::<u16>() | (hi.cast::<u16>() << Simd::from([8; N]));
+  let sextets = (shifted >> simd!(N; |i| [2, 4, 6, 8][i % 4])).cast::<u8>();
 
   // Now we have what is essentially a u6 array that looks like this:
   //  aaaaaa.. bbbbbb.. cccccc.. dddddd.. eeeeee.. ffffff.. gggggg.. hhhhhh..
 
-  let uppers = sextets.simd_lt(Simd::splat(26));
-  let lowers = !uppers & sextets.simd_lt(Simd::splat(52));
-  let digits = !uppers & !lowers & sextets.simd_lt(Simd::splat(62));
-  let pluses = sextets.simd_eq(Simd::splat(62));
-  let slashes = sextets.simd_eq(Simd::splat(63));
+  // We need to split into five ranges: 0x00..=0x19, 0x1a..=0x33, 0x34..=0x3d,
+  // 0x3e, and 0x3f. If we (saturating) subtract 0x1a from each range, we get
+  //
+  // - 0x00..=0x0f
+  // - 0x10..=0x29
+  // - 0x2a..=0x33
+  // - 0x34,  0x35
+  //
+  // If we then form a mask from "sextets >= 0x34", and add the low nybble of
+  // the mask (effectively, adding 0xf to the bottom two rows) we get
+  //
+  // - 0x00..=0x0f
+  // - 0x10..=0x29
+  // - 0x39..=0x42
+  // - 0x43, =0x44
+  //
+  // Then, if we form a mask from "sextets >= 0x3e", select 0x1c, and add that
+  // to the result, we get
+  //
+  // - 0x00..=0x0f
+  // - 0x10..=0x29
+  // - 0x39..=0x42
+  // - 0x5f, =0x60
+  //
+  // If we shift the high nybbles down, this contrivance is a perfect hash, just
+  // like in the encoding function.
 
-  let ascii = sextets
-    - mask_splat(uppers, -65)
-    - mask_splat(lowers, -71)
-    - mask_splat(digits, 4)
-    - mask_splat(pluses, 19)
-    - mask_splat(slashes, 16);
+  let hashes = (sextets.saturating_sub([0x0a; N].into())
+    + mask_splat(sextets.simd_ge([0x34; N].into()), 0x0f)
+    + mask_splat(sextets.simd_ge([0x3e; N].into()), 0x1c))
+    >> Simd::from([4; N]);
 
-  ascii.cast::<u8>()
+  let offsets =
+    simd!(N; |i| [191, 185, 185, 4, 4, 19, 16, !0][i % 8]).swizzle_dyn(hashes);
+
+  sextets - offsets
 }
 
 /// Shorthand for mask.select(splat(val), splat(0)).
@@ -239,5 +243,51 @@ where
     Simd::swizzle_dyn(resize(table), indices)
   } else {
     resize(Simd::swizzle_dyn(table, resize(indices)))
+  }
+}
+
+// Helper for debug printing vectors.
+#[allow(dead_code)]
+struct SimdDbg<V>(pub V);
+
+impl<T, const N: usize> fmt::Binary for SimdDbg<Simd<T, N>>
+where
+  T: SimdElement + fmt::Binary,
+  LaneCount<N>: SupportedLaneCount,
+{
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    struct Patch<T>(T);
+    impl<T: fmt::Binary> fmt::Debug for Patch<T> {
+      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Binary::fmt(&self.0, f)
+      }
+    }
+
+    let mut f = f.debug_list();
+    for b in self.0.to_array() {
+      f.entry(&Patch(b));
+    }
+    f.finish()
+  }
+}
+
+impl<T, const N: usize> fmt::LowerHex for SimdDbg<Simd<T, N>>
+where
+  T: SimdElement + fmt::LowerHex,
+  LaneCount<N>: SupportedLaneCount,
+{
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    struct Patch<T>(T);
+    impl<T: fmt::LowerHex> fmt::Debug for Patch<T> {
+      fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+      }
+    }
+
+    let mut f = f.debug_list();
+    for b in self.0.to_array() {
+      f.entry(&Patch(b));
+    }
+    f.finish()
   }
 }

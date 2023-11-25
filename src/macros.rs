@@ -2,8 +2,21 @@
 
 use std::mem::MaybeUninit;
 
+pub const fn invert_index<const N: usize>(array: [usize; N]) -> [usize; N] {
+  let mut out = [N; N];
+  let mut i = 0;
+  while i < N {
+    if array[i] < N {
+      out[array[i]] = i;
+    }
+    i += 1;
+  }
+
+  out
+}
+
 /// Type-checking guard for `array!()`.
-pub(crate) const unsafe fn array_assume_init<T: Copy, const N: usize>(
+pub const unsafe fn array_assume_init<T: Copy, const N: usize>(
   array: &[MaybeUninit<T>; N],
 ) -> [T; N] {
   (array as *const [MaybeUninit<T>; N])

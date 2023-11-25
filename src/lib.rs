@@ -73,11 +73,7 @@ pub fn decode_to(data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
 
 /// Encodes arbitrary data as base64 and appends it to `out`.
 pub fn encode_to(data: &[u8], out: &mut Vec<u8>) {
-  if cfg!(target_feature = "avx2") {
-    encode_tunable::<16>(data, out)
-  } else {
-    encode_tunable::<8>(data, out)
-  }
+  encode_tunable::<16>(data, out)
 }
 
 fn decode_tunable<const N: usize>(
@@ -117,7 +113,8 @@ where
 
   let rest = chunks.remainder();
   if !rest.is_empty() {
-    let (decoded, ok) = simd::decode(from_slice_or::<N, b'A'>(rest));
+    let (decoded, ok) =
+      simd::decode(unsafe { read_slice_padded::<N, b'A'>(rest) });
     failed |= !ok;
 
     unsafe {
@@ -192,7 +189,7 @@ where
       let rest = end.offset_from(start) as usize;
       std::slice::from_raw_parts(start, rest.min(n3q))
     };
-    let encoded = simd::encode(from_slice_or::<N, 0>(chunk));
+    let encoded = simd::encode(unsafe { read_slice_padded::<N, 0>(chunk) });
 
     unsafe {
       start = start.add(chunk.len());
@@ -215,36 +212,30 @@ where
 }
 
 fn decoded_len(input: usize) -> usize {
-  input / 4 * 3
-    + match input % 4 {
-      1 | 2 => 1,
-      3 => 2,
-      _ => 0,
-    }
+  let mod4 = input % 4;
+  input / 4 * 3 + (mod4 - mod4 / 2)
 }
 
 fn encoded_len(input: usize) -> usize {
-  input / 3 * 4
-    + match input % 3 {
-      1 => 2,
-      2 => 3,
-      _ => 0,
-    }
+  let mod3 = input % 3;
+  input / 3 * 4 + (mod3 + (mod3 + 1) / 2)
 }
 
 /// Gathers elements, in order, from `slice`, replacing them with `Z`
 /// if `slice` is too short.
 ///
 /// This is approximately 2-3x faster than `Simd::gather_or` on AVX2.
+///
+/// # Safety
+///
+/// `slice.len()` must be within `1..N`.
 #[inline(always)]
-fn from_slice_or<const N: usize, const Z: u8>(slice: &[u8]) -> Simd<u8, N>
+unsafe fn read_slice_padded<const N: usize, const Z: u8>(
+  slice: &[u8],
+) -> Simd<u8, N>
 where
   LaneCount<N>: SupportedLaneCount,
 {
-  if slice.len() >= N {
-    return unsafe { slice.as_ptr().cast::<Simd<u8, N>>().read_unaligned() };
-  }
-
   let mut buf = [Z; N];
 
   // Load a bunch of big 16-byte chunks. This should select "load vector"
@@ -254,10 +245,9 @@ where
   if slice.len() >= 16 {
     for i in 0..slice.len() / 16 {
       unsafe {
-        write_at = write_at.add(i * 16);
-
         let word = slice.as_ptr().cast::<u128>().add(i).read_unaligned();
         write_at.cast::<u128>().write_unaligned(word);
+        write_at = write_at.add(16);
       }
     }
   }
@@ -297,7 +287,7 @@ where
 
       let z = u64::from_ne_bytes([Z; 8]) << (len * 8);
       write_at.cast::<u64>().write_unaligned(data | z);
-    } else {
+    } else if len >= 1 {
       // For len       1       2       3     ...
       // ... this is  ptr[0]  ptr[0]  ptr[0]
       let lo = ptr.read() as u32;
@@ -318,7 +308,7 @@ where
 
 #[cfg(test)]
 mod tests {
-  fn tests() -> Vec<(usize, &'static [u8], Vec<u8>)> {
+  fn random_tests() -> Vec<(usize, &'static [u8], Vec<u8>)> {
     use base64::prelude::*;
     include_bytes!("test_vectors.txt")
       .split(|&b| b == b'\n')
@@ -327,16 +317,39 @@ mod tests {
       .collect()
   }
 
+  fn all_ones_tests() -> Vec<(usize, Vec<u8>, Vec<u8>)> {
+    use base64::prelude::*;
+    (0..500)
+      .map(|i| vec![0xff; i])
+      .enumerate()
+      .map(|(i, bin)| (i, BASE64_STANDARD.encode(&bin).into_bytes(), bin))
+      .collect()
+  }
+
   #[test]
-  fn decode() {
-    for (i, enc, dec) in tests() {
+  fn random_decode() {
+    for (i, enc, dec) in random_tests() {
       assert_eq!(crate::decode(enc).unwrap(), dec, "case {i}");
     }
   }
 
   #[test]
-  fn encode() {
-    for (i, enc, dec) in tests() {
+  fn random_encode() {
+    for (i, enc, dec) in random_tests() {
+      assert_eq!(crate::encode(&dec).as_bytes(), enc, "case {i}");
+    }
+  }
+
+  #[test]
+  fn all_ones_decode() {
+    for (i, enc, dec) in all_ones_tests() {
+      assert_eq!(crate::decode(&enc).unwrap(), dec, "case {i}");
+    }
+  }
+
+  #[test]
+  fn all_ones_encode() {
+    for (i, enc, dec) in all_ones_tests() {
       assert_eq!(crate::encode(&dec).as_bytes(), enc, "case {i}");
     }
   }
