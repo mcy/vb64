@@ -7,6 +7,7 @@ use std::simd::SimdElement;
 use std::simd::SupportedLaneCount;
 
 use crate::util::invert_index;
+use crate::util::tiled;
 
 /// Decodes `ascii` as base64. Returns the results of the decoding in the low
 /// 3/4 of the returned vector, as well as whether decoding completed
@@ -77,9 +78,8 @@ where
       .to_int()
       .cast::<u8>();
 
-  let sextets = ascii
-    + simd!(N; |i| [!0, 16, 19, 4, 191, 191, 185, 185][i % 8])
-      .swizzle_dyn(hashes);
+  let sextets =
+    ascii + tiled(&[!0, 16, 19, 4, 191, 191, 185, 185]).swizzle_dyn(hashes);
 
   // We also need to do a range check to reject invalid characters.
 
@@ -132,7 +132,7 @@ where
   // u8 shuffle:
   //  bbaaaaaa ccccbbbb ddddddcc ffeeeeee ggggffff hhhhhhgg ........ ........
 
-  let shifted = sextets.cast::<u16>() << simd!(N; |i| [2, 4, 6, 8][i % 4]);
+  let shifted = sextets.cast::<u16>() << tiled(&[2, 4, 6, 8]);
 
   let lo = shifted.cast::<u8>();
   let hi = (shifted >> Simd::from([8; N])).cast::<u8>();
@@ -154,8 +154,7 @@ where
   let data = swizzle!(N; data, invert_index(array!(N; |i| i + i / 3)));
 
   // Next, we need to undo the "or" at the end of decode_simd.
-  let mask =
-    simd!(N; |i| [0b11111100, 0b11110000, 0b11000000, 0b00000000][i % 4]);
+  let mask = tiled(&[0b11111100, 0b11110000, 0b11000000, 0b00000000]);
 
   // Note that we also need to undo the rotate we did to `hi`.
   let lo = data & mask;
@@ -163,7 +162,7 @@ where
 
   // Interleave the shuffled pieces and undo the shift.
   let shifted = lo.cast::<u16>() | (hi.cast::<u16>() << Simd::from([8; N]));
-  let sextets = (shifted >> simd!(N; |i| [2, 4, 6, 8][i % 4])).cast::<u8>();
+  let sextets = (shifted >> tiled(&[2, 4, 6, 8])).cast::<u8>();
 
   // Now we have what is essentially a u6 array that looks like this:
   //  aaaaaa.. bbbbbb.. cccccc.. dddddd.. eeeeee.. ffffff.. gggggg.. hhhhhh..
@@ -200,8 +199,7 @@ where
     + mask_splat(sextets.simd_ge([0x3e; N].into()), 0x1c))
     >> Simd::from([4; N]);
 
-  let offsets =
-    simd!(N; |i| [191, 185, 185, 4, 4, 19, 16, !0][i % 8]).swizzle_dyn(hashes);
+  let offsets = tiled(&[191, 185, 185, 4, 4, 19, 16, !0]).swizzle_dyn(hashes);
 
   sextets - offsets
 }
