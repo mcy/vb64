@@ -41,8 +41,8 @@ where
   let uppers = in_range(ascii, b'A'..=b'Z');
   let lowers = in_range(ascii, b'a'..=b'z');
   let digits = in_range(ascii, b'0'..=b'9');
-  let pluses = ascii.simd_eq([b'+'; N].into());
-  let slashes = ascii.simd_eq([b'/'; N].into());
+  let pluses = ascii.simd_eq(Simd::splat(b'+'));
+  let slashes = ascii.simd_eq(Simd::splat(b'/'));
 
   let valid = (uppers | lowers | digits | pluses | slashes).all();
 
@@ -135,7 +135,7 @@ where
   let shifted = sextets.cast::<u16>() << tiled(&[2, 4, 6, 8]);
 
   let lo = shifted.cast::<u8>();
-  let hi = (shifted >> Simd::from([8; N])).cast::<u8>();
+  let hi = (shifted >> Simd::splat(8)).cast::<u8>();
   let decoded_chunks = lo | hi.rotate_lanes_left::<1>();
 
   let output = swizzle!(N; decoded_chunks, array!(N; |i| i + i / 3));
@@ -161,7 +161,7 @@ where
   let hi = (data & !mask).rotate_lanes_right::<1>();
 
   // Interleave the shuffled pieces and undo the shift.
-  let shifted = lo.cast::<u16>() | (hi.cast::<u16>() << Simd::from([8; N]));
+  let shifted = lo.cast::<u16>() | (hi.cast::<u16>() << Simd::splat(8));
   let sextets = (shifted >> tiled(&[2, 4, 6, 8])).cast::<u8>();
 
   // Now we have what is essentially a u6 array that looks like this:
@@ -194,10 +194,10 @@ where
   // If we shift the high nybbles down, this contrivance is a perfect hash, just
   // like in the encoding function.
 
-  let hashes = (sextets.saturating_sub([0x0a; N].into())
-    + mask_splat(sextets.simd_ge([0x34; N].into()), 0x0f)
-    + mask_splat(sextets.simd_ge([0x3e; N].into()), 0x1c))
-    >> Simd::from([4; N]);
+  let hashes = (sextets.saturating_sub(Simd::splat(0x0a))
+    + mask_splat(sextets.simd_ge(Simd::splat(0x34)), 0x0f)
+    + mask_splat(sextets.simd_ge(Simd::splat(0x3e)), 0x1c))
+    >> Simd::splat(4);
 
   let offsets = tiled(&[191, 185, 185, 4, 4, 19, 16, !0]).swizzle_dyn(hashes);
 
