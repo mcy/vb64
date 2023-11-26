@@ -1,6 +1,6 @@
 [package]
 name = "vb64"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 authors = ["Miguel Young de la Sota <mcyoung@mit.edu>"]
