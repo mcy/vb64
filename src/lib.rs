@@ -76,7 +76,7 @@ pub fn encode_to(data: &[u8], out: &mut Vec<u8>) {
 }
 
 fn decode_tunable<const N: usize>(
-  mut data: &[u8],
+  data: &[u8],
   out: &mut Vec<u8>,
 ) -> Result<(), Error>
 where
@@ -84,11 +84,9 @@ where
 {
   assert!(N % 4 == 0);
 
-  if let Some(stripped) =
-    data.strip_suffix(b"==").or_else(|| data.strip_suffix(b"="))
-  {
-    data = stripped;
-  }
+  let data = match data {
+    [p @ .., b'=', b'='] | [p @ .., b'='] | p => p,
+  };
 
   if data.is_empty() {
     return Ok(());
