@@ -63,7 +63,9 @@ pub fn encode(data: &[u8]) -> String {
 
 /// Decodes some base64 data as base64 and appends it to `out`.
 pub fn decode_to(data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
-  if cfg!(target_feature = "avx2") {
+  if cfg!(target_feature = "avx512") {
+    decode_tunable::<64>(data, out)
+  } else if cfg!(target_feature = "avx2") {
     decode_tunable::<32>(data, out)
   } else {
     decode_tunable::<16>(data, out)
