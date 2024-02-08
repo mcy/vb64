@@ -136,7 +136,7 @@ where
 
   let lo = shifted.cast::<u8>();
   let hi = (shifted >> Simd::splat(8)).cast::<u8>();
-  let decoded_chunks = lo | hi.rotate_lanes_left::<1>();
+  let decoded_chunks = lo | hi.rotate_elements_left::<1>();
 
   let output = swizzle!(N; decoded_chunks, array!(N; |i| i + i / 3));
 
@@ -158,7 +158,7 @@ where
 
   // Note that we also need to undo the rotate we did to `hi`.
   let lo = data & mask;
-  let hi = (data & !mask).rotate_lanes_right::<1>();
+  let hi = (data & !mask).rotate_elements_right::<1>();
 
   // Interleave the shuffled pieces and undo the shift.
   let shifted = lo.cast::<u16>() | (hi.cast::<u16>() << Simd::splat(8));

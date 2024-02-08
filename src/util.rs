@@ -75,23 +75,23 @@ macro_rules! swizzle {
   ($N:ident; $x:expr, $index:expr) => {{
     use std::simd::*;
     struct Swz;
-    impl<const $N: usize> Swizzle2<$N, $N> for Swz
+    impl<const $N: usize> Swizzle<$N> for Swz
     where
       LaneCount<$N>: SupportedLaneCount,
     {
-      const INDEX: [Which; $N] = {
+      const INDEX: [usize; $N] = {
         let index = $index;
         array!($N; |i| {
           let i = index[i];
           if i >= $N {
-            Which::Second(0)
+            $N
           } else {
-            Which::First(i)
+            i
           }
         })
       };
     }
 
-    Swz::swizzle2($x, Simd::splat(0))
+    Swz::concat_swizzle($x, Simd::splat(0))
   }};
 }
