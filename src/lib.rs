@@ -33,6 +33,7 @@
 // The comedy of using base64 to encode an image of benchmark results from my
 // base64 library is not lost on me.
 #![doc = concat!("[graph-png]: data:image/png;base64,", include_str!("../images/graph.png.base64"))]
+#![feature(array_chunks)]
 #![feature(portable_simd)]
 
 use std::simd::LaneCount;
@@ -96,10 +97,10 @@ where
   out.reserve(decoded_len(data.len()) + N);
   let mut raw_out = out.as_mut_ptr_range().end;
 
-  let mut chunks = data.chunks_exact(N);
+  let mut chunks = data.array_chunks();
   let mut failed = false;
   for chunk in &mut chunks {
-    let (decoded, ok) = simd::decode(Simd::from_slice(chunk));
+    let (decoded, ok) = simd::decode(Simd::from_array(*chunk));
     failed |= !ok;
 
     unsafe {
